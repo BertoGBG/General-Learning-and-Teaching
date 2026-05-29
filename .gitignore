@@ -1,4 +1,31 @@
-literature/
-CLAUDE.md
+# Source files (share PDF only)
+*.tex
+*.txt
+
+# Git config (keep local)
+.gitignore
+
+# LaTeX build artefacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.xdv
+
+# macOS
 .DS_Store
+
+# CLAUDE
+CLAUDE.md
+
+# folders
+/literature
+
+# folders
+literature/
 .idea/
+
+
