@@ -1,0 +1,1903 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{eurosym}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tcolorbox}
+\geometry{margin=2.5cm}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=blue!60!black,
+}
+
+\lstset{
+    language=Python,
+    basicstyle=\small\ttfamily,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{orange!70!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    backgroundcolor=\color{gray!8},
+}
+
+\title{Interpretation of KKT Multipliers in Energy System Optimization\\
+\large Capacity, Dispatch, and Multi-carrier Networks in PyPSA}
+\author{Alberto Alamia}
+\date{May 2026}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Introduction and Problem Formulation}
+\label{sec:intro}
+% ============================================================
+
+In energy system models we distinguish between two types of decisions:
+\begin{itemize}
+    \item \textbf{Dispatch decisions}: how much to generate at each time step $t$
+    \item \textbf{Capacity decisions}: how much installed capacity to build (investment)
+\end{itemize}
+
+A \textbf{capacity and dispatch} (or \emph{investment and operation}) optimisation jointly
+determines both~\cite{Stoft2002,Kirschen2004}. The general linear problem takes the form:
+
+\begin{align}
+\min_{g,\, G,\, f,\, F} \quad
+    & \sum_{s} c_s G_s + \sum_{l} c_l F_l
+      + \sum_{s,t} w_t \, o_s \, g_{s,t} \label{eq:obj} \\
+\text{s.t.} \quad
+    & \sum_{s \in \mathcal{S}_n} g_{s,t}
+      - \sum_{l:\, n^-(l)=n} f_{l,t}
+      + \sum_{l:\, n^+(l)=n} f_{l,t}
+      = d_{n,t}
+      \quad \forall n,t \label{eq:balance} \\
+    & 0 \le g_{s,t} \le G_s
+      \quad \forall s,t \label{eq:dispatch_limit} \\
+    & -F_l \le f_{l,t} \le F_l
+      \quad \forall l,t \label{eq:flow_limit} \\
+    & \sum_{\ell} C_{\ell c}\, x_\ell\, f_{\ell,t} = 0
+      \quad \forall c,\, \forall t \label{eq:kvl} \\
+    & G_s \ge 0 \quad \forall s, \qquad F_l \ge 0 \quad \forall l
+\end{align}
+
+where:
+\begin{itemize}
+    \item $g_{s,t} \ge 0$ is the dispatch of generator $s$ at time $t$
+    \item $G_s \ge 0$ is the installed capacity of generator $s$
+    \item $f_{l,t}$ is the power flow on line $l$ at time $t$
+    \item $F_l \ge 0$ is the capacity of line $l$
+    \item $c_s,\, c_l$ are annualised capital costs (\euro/MW/year)
+    \item $o_s$ is the variable cost (\euro/MWh)
+    \item $w_t$ is the snapshot weight (hours per snapshot)
+    \item $d_{n,t}$ is the demand at node $n$ and time $t$
+    \item $C_{\ell c}$ is the cycle incidence matrix, $x_\ell$ is the branch reactance
+\end{itemize}
+
+\subsection{The Role of Lines and KVL}
+\label{sec:lines_kvl}
+
+The status of line flows $f_{l,t}$ as optimisation variables is a frequent
+source of confusion and is worth addressing carefully.
+
+\paragraph{Two equivalent perspectives.}
+The LOPF problem admits several equivalent formulations that differ in what
+variables are used explicitly~\cite{Horsch2018}.
+The classical \emph{angle formulation} uses the bus voltage angles $\theta_{n,t}$
+as the primary variables; the flows are then derived quantities:
+\begin{equation}
+    f_{l,t} = \frac{\theta_{n^-(l),t} - \theta_{n^+(l),t}}{x_l}
+    \label{eq:angle_flow}
+\end{equation}
+and KVL is satisfied \emph{automatically} because every cycle is in the kernel
+of the incidence matrix.
+
+The \emph{Kirchhoff formulation} (used by PyPSA~\cite{Horsch2018}) promotes
+$f_{l,t}$ to an explicit optimisation variable and enforces KVL as an explicit
+equality constraint~\eqref{eq:kvl}:
+\begin{equation}
+    \sum_{\ell \in \text{cycle } c} C_{\ell c}\, x_\ell\, f_{\ell,t} = 0
+    \qquad \forall c = 1,\ldots,L-N+1,\quad \forall t
+    \label{eq:kvl_explicit}
+\end{equation}
+where $C_{\ell c} \in \{-1,0,+1\}$ is the cycle incidence matrix and
+$L - N + 1$ is the number of independent cycles in the network.
+
+\paragraph{Are line flows free optimisation variables?}
+In the Kirchhoff formulation, yes --- $f_{l,t}$ are formal optimisation
+variables, and the KVL constraints \eqref{eq:kvl_explicit} are explicit
+equality constraints. Both perspectives yield \emph{mathematically identical
+solutions}; the difference is only computational.
+
+The KVL constraints are far from trivial for meshed networks: for a network
+with $N$ buses and $L$ lines they provide $L - N + 1$ independent equations
+per snapshot. Together with the KCL nodal balance \eqref{eq:balance}
+(which provides $N - 1$ independent equations), they uniquely determine all
+$L$ flows given the power injections. The ``degrees of freedom'' for line
+flows are therefore $L - (N-1) - (L-N+1) = 0$: once the injections are set,
+the physics uniquely fix every flow.
+
+\paragraph{Special case: tree networks.}
+For a network with no cycles ($L = N-1$, a spanning tree), $L - N + 1 = 0$
+and the KVL constraint set is empty. In this case the flows are \emph{uniquely}
+determined by KCL alone, and the KVL constraint is vacuously satisfied. The
+triangle example (Section~\ref{sec:triangle}) illustrates the meshed case.
+
+\paragraph{KVL dual variables.}
+The KVL constraints \eqref{eq:kvl} are equality constraints and therefore
+have an unrestricted dual variable $\kappa_{c,t}$ (one per independent cycle
+and snapshot). These appear in the Lagrangian and affect the stationarity
+condition for the line flows. Their economic interpretation is discussed in
+Section~\ref{sec:kkt} together with the full set of KKT conditions.
+
+\paragraph{In PyPSA.}
+PyPSA implements the Kirchhoff formulation by default~\cite{Horsch2018},
+promoting line flows to explicit optimisation variables and adding the KVL
+equality constraints~\eqref{eq:kvl_explicit} to the problem.
+Generators with \texttt{p\_nom\_extendable = True} have $G_s$ as a free variable;
+lines with \texttt{s\_nom\_extendable = True} have $F_l$ as a free variable.
+
+\subsection{Generalised Dispatchable Components: Full Problem Formulation}
+\label{sec:generalised}
+
+Many components in multi-energy PyPSA models --- electrolysers, heat pumps,
+gas turbines, HVDC links, one-way pipelines --- are better described as
+\textbf{controllable, dispatchable links with efficiency}: they withdraw a
+controlled flow from an input bus, convert it, and inject the result into an
+output bus. This corresponds to the \texttt{Link} component in PyPSA.
+
+A \textbf{generalised dispatchable component} $s$ is characterised by:
+\begin{itemize}
+    \item An \textbf{input bus} $n^-(s)$, from which it withdraws $g_{s,t}$
+    \item An \textbf{output bus} $n^+(s)$, into which it injects $\eta_s\, g_{s,t}$
+    \item An \textbf{efficiency} $\eta_s \in (0,1]$
+    \item A \textbf{variable cost} $o_s \ge 0$ per unit of input
+    \item A \textbf{capital cost} $c_s \ge 0$ per unit of capacity $G_s$
+    \item \textbf{Monodirectional} dispatch: $g_{s,t} \in [0, G_s]$
+\end{itemize}
+
+The full problem --- generators, passive lines, and generalised links ---
+is then:
+
+\begin{align}
+\min_{g,\, G,\, f,\, F} \quad
+    & \sum_{s} c_s G_s + \sum_{l} c_l F_l
+      + \sum_{s,t} w_t \, o_s \, g_{s,t} \tag{P} \label{eq:full_obj} \\
+\text{s.t.} \quad
+    & \underbrace{\sum_{s:\, n^+(s)=n} \eta_s g_{s,t}
+      - \sum_{s:\, n^-(s)=n} g_{s,t}
+      + \sum_{l} K_{nl}\, f_{l,t}}_{\text{KCL at node }n}
+      = d_{n,t}
+      \quad \forall n,t
+      \tag{KCL} \label{eq:full_kcl} \\
+    & \sum_{\ell} C_{\ell c}\, x_\ell\, f_{\ell,t} = 0
+      \quad \forall c,\, \forall t
+      \tag{KVL} \label{eq:full_kvl} \\
+    & 0 \le g_{s,t} \le G_s \quad \forall s,t
+      \tag{D} \label{eq:full_disp} \\
+    & -F_l \le f_{l,t} \le F_l \quad \forall l,t
+      \tag{FL} \label{eq:full_flow} \\
+    & G_s \ge 0,\quad F_l \ge 0
+\end{align}
+
+This formulation \eqref{eq:full_obj}--\eqref{eq:full_flow} is the reference
+throughout the rest of this document. The extension to storage components is
+treated separately in Section~\ref{sec:storage_extension} because storage
+introduces intertemporal coupling that merits its own analysis.
+
+Table~\ref{tab:special_cases} shows how generators and bidirectional links
+are special cases of the generalised component.
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{llllll}
+\toprule
+\textbf{Component} & $n^-(s)$ & $n^+(s)$ & $\eta_s$ & $o_s$
+    & \textbf{Stationarity (interior dispatch)} \\
+\midrule
+Generator &
+    (fuel/slack) & electricity bus & $\le 1$ & $> 0$ &
+    $\lambda_{n,t} = w_t\, o_s / \eta_s$ \\
+Lossless link (one dir.) &
+    bus A & bus B & $1$ & $0$ &
+    $\lambda_{A,t} = \lambda_{B,t}$ \\
+Lossy converter &
+    bus A & bus B & $< 1$ & $\ge 0$ &
+    $\lambda_{A,t} = \eta_s\,\lambda_{B,t} + w_t\, o_s$ \\
+Bidirectional link &
+    \multicolumn{2}{l}{two components $s^+$, $s^-$} & $1$ & $0$ &
+    $\lambda_{A,t} - \lambda_{B,t} = \bar{\mu}^+_t - \bar{\mu}^-_t$ \\
+\bottomrule
+\end{tabular}
+\caption{Special cases of the generalised dispatchable component.
+The last column shows the stationarity condition when the component is
+freely dispatched ($0 < g_{s,t} < G_s$, so all bound duals vanish).
+This is the \emph{zero-profit condition}, discussed in
+Section~\ref{sec:zero_profit}.}
+\label{tab:special_cases}
+\end{table}
+
+% ============================================================
+\section{Lagrangian and KKT Conditions}
+\label{sec:kkt}
+% ============================================================
+
+\subsection{Lagrangian}
+
+We introduce dual variables for each constraint in problem~\eqref{eq:full_obj}--\eqref{eq:full_flow}
+following the standard Lagrangian duality framework~\cite{Boyd2004,Bertsekas2016}:
+\begin{itemize}
+    \item $\lambda_{n,t}$: dual of the nodal balance \eqref{eq:full_kcl} (equality,
+          unrestricted sign)
+    \item $\kappa_{c,t}$: dual of the KVL constraint \eqref{eq:full_kvl} (equality,
+          unrestricted sign)
+    \item $\underline{\mu}_{s,t} \ge 0$: dual of the lower dispatch bound $g_{s,t} \ge 0$
+    \item $\bar{\mu}_{s,t} \ge 0$: dual of the upper dispatch bound $g_{s,t} \le G_s$
+    \item $\bar{\mu}^+_{l,t} \ge 0$: dual of the upper flow bound $f_{l,t} \le F_l$
+    \item $\bar{\mu}^-_{l,t} \ge 0$: dual of the lower flow bound $f_{l,t} \ge -F_l$
+\end{itemize}
+
+We assume $G_s > 0$ and $F_l > 0$ at optimality, so the non-negativity
+duals for capacities are zero by complementary slackness and are omitted.
+
+The Lagrangian of problem~\eqref{eq:full_obj}--\eqref{eq:full_flow} is:
+
+\begin{align}
+\mathcal{L} \;=\;&
+    \sum_s c_s G_s + \sum_l c_l F_l + \sum_{s,t} w_t o_s g_{s,t}
+    \notag \\
+&- \sum_{n,t} \lambda_{n,t}
+    \Bigl(
+      \sum_{s:\,n^+(s)=n} \eta_s g_{s,t}
+      - \sum_{s:\,n^-(s)=n} g_{s,t}
+      + \sum_l K_{nl} f_{l,t}
+      - d_{n,t}
+    \Bigr)
+    \notag \\
+&- \sum_{c,t} \kappa_{c,t}
+    \Bigl(\sum_\ell C_{\ell c}\, x_\ell\, f_{\ell,t}\Bigr)
+    \notag \\
+&- \sum_{s,t} \underline{\mu}_{s,t}\, g_{s,t}
+ + \sum_{s,t} \bar{\mu}_{s,t}\,(g_{s,t} - G_s)
+    \notag \\
+&+ \sum_{l,t} \bar{\mu}^+_{l,t}\,(f_{l,t} - F_l)
+ - \sum_{l,t} \bar{\mu}^-_{l,t}\,(f_{l,t} + F_l)
+    \label{eq:lagrangian}
+\end{align}
+
+The stationarity conditions below follow directly from setting
+$\partial\mathcal{L}/\partial x = 0$ for each decision variable $x$.
+
+\subsection{Stationarity Conditions}
+
+\paragraph{With respect to dispatch $g_{s,t}$:}
+\begin{equation}
+    \boxed{w_t\, o_s - \lambda_{n^+(s),t}\,\eta_s + \lambda_{n^-(s),t}
+    - \underline{\mu}_{s,t} + \bar{\mu}_{s,t} = 0}
+    \label{eq:stat_dispatch}
+\end{equation}
+
+For a generator injecting into bus $n$ (with $n^-(s)$ a virtual fuel bus at zero price):
+\begin{equation}
+    \lambda_{n,t} = w_t\, o_s + \bar{\mu}_{s,t} - \underline{\mu}_{s,t}
+    \label{eq:stat_gen}
+\end{equation}
+
+\paragraph{With respect to generator capacity $G_s$:}
+\begin{equation}
+    \boxed{c_s = \sum_t \bar{\mu}_{s,t}}
+    \label{eq:stat_cap_s}
+\end{equation}
+
+\paragraph{With respect to line flow $f_{l,t}$:}
+In the Kirchhoff formulation $f_{l,t}$ is a decision variable, so a
+stationarity condition exists:
+\begin{equation}
+    \frac{\partial \mathcal{L}}{\partial f_{l,t}} = 0
+    \quad \Longrightarrow \quad
+    \boxed{
+      -\lambda_{n^+(l),t} + \lambda_{n^-(l),t}
+      - \sum_c \kappa_{c,t}\, C_{lc}\, x_l
+      + \bar{\mu}^+_{l,t} - \bar{\mu}^-_{l,t} = 0
+    }
+    \label{eq:stat_flow}
+\end{equation}
+
+\textbf{Interpretation.}
+For an uncongested line ($\bar{\mu}^+_{l,t} = \bar{\mu}^-_{l,t} = 0$):
+\begin{equation}
+    \lambda_{n^-(l),t} - \lambda_{n^+(l),t}
+    = \sum_c \kappa_{c,t}\, C_{lc}\, x_l
+    \label{eq:price_diff_kvl}
+\end{equation}
+The nodal price difference across an uncongested line is \emph{not} zero in
+a meshed network: it equals the reactance-weighted contribution of the KVL
+duals $\kappa_{c,t}$. This is the mathematical expression of Kirchhoff's
+physics --- the price signal propagates through the network topology.
+Only in a radial (tree) network, where there are no cycles and $\kappa_{c,t}$
+vanishes identically, does an uncongested line guarantee equal prices
+at both ends.
+
+\paragraph{With respect to line capacity $F_l$:}
+\begin{equation}
+    \boxed{c_l = \sum_t \bigl(\bar{\mu}^+_{l,t} + \bar{\mu}^-_{l,t}\bigr)}
+    \label{eq:stat_cap_l}
+\end{equation}
+
+\subsection{Complementary Slackness}
+
+For each inequality constraint, complementary slackness states that
+the dual variable is non-zero \emph{only} when the constraint is
+active (binding):
+
+\begin{align}
+    \underline{\mu}_{s,t} \ge 0, &\quad \underline{\mu}_{s,t} \cdot g_{s,t} = 0
+    \quad \Rightarrow\quad
+    \underline{\mu}_{s,t} > 0 \iff g_{s,t} = 0 \label{eq:cs1} \\
+    \bar{\mu}_{s,t} \ge 0, &\quad \bar{\mu}_{s,t} \cdot (g_{s,t} - G_s) = 0
+    \quad \Rightarrow\quad
+    \bar{\mu}_{s,t} > 0 \iff g_{s,t} = G_s \label{eq:cs2} \\
+    \bar{\mu}^+_{l,t} \ge 0, &\quad \bar{\mu}^+_{l,t} \cdot (f_{l,t} - F_l) = 0
+    \quad \Rightarrow\quad
+    \bar{\mu}^+_{l,t} > 0 \iff f_{l,t} = F_l \label{eq:cs3} \\
+    \bar{\mu}^-_{l,t} \ge 0, &\quad \bar{\mu}^-_{l,t} \cdot (f_{l,t} + F_l) = 0
+    \quad \Rightarrow\quad
+    \bar{\mu}^-_{l,t} > 0 \iff f_{l,t} = -F_l \label{eq:cs4}
+\end{align}
+
+The key consequence: a dual variable can only be non-zero when its constraint is \emph{tight}.
+Slack constraints contribute nothing to the stationarity conditions and carry
+zero economic value.
+
+\subsection{Sign Convention and Non-negativity}
+
+For the KKT conditions to be necessary and sufficient (strong duality), the
+problem must be convex, which is guaranteed here (linear objective and linear
+constraints). The sign conventions are:
+
+\begin{tcolorbox}[colback=blue!5, colframe=blue!40!black, title={KKT Sign Summary}]
+\begin{itemize}
+    \item $\lambda_{n,t}$: unrestricted (equality constraint dual); typically positive
+          as it represents the value of one additional MW of supply at node $n$
+    \item $\kappa_{c,t}$: unrestricted (equality constraint dual)
+    \item $\underline{\mu}_{s,t} \ge 0$: non-negative (lower bound dual);
+          positive when generator is idle
+    \item $\bar{\mu}_{s,t} \ge 0$: non-negative (upper bound dual);
+          positive when generator is at full capacity
+    \item $\bar{\mu}^{\pm}_{l,t} \ge 0$: non-negative (flow bound duals);
+          positive when line is congested
+\end{itemize}
+\end{tcolorbox}
+
+% ============================================================
+\section{Objective Decomposition: Primal and Dual Perspectives}
+\label{sec:decomposition}
+% ============================================================
+
+The objective function of a linear programme is a sum over all decision
+variables weighted by their cost coefficients. This has an immediate
+consequence: the optimal total cost can be partitioned \emph{exactly} into
+contributions from any non-overlapping grouping of the variables. Applied to
+an energy system, this allows the total system cost to be attributed to
+individual plants, technology classes, carriers, or geographic zones --- with
+no approximation. Two complementary decompositions are possible: one in terms
+of primal variables (direct costs), one in terms of dual variables (nodal
+prices and rents). They give the same number per group, but carry different
+economic interpretations.
+
+\subsection{Primal (Cost) Decomposition}
+
+Partitioning all components into non-overlapping subsets
+$\mathcal{P}_1, \mathcal{P}_2, \ldots$ (each component belongs to exactly
+one subset; together they cover all components), the objective
+\eqref{eq:full_obj} decomposes by linearity of the sum:
+\begin{equation}
+    \text{obj}^*
+    = \sum_k \underbrace{\sum_{s \in \mathcal{P}_k}
+      \Bigl(c_s G_s^* + \sum_t w_t\, o_s\, g_{s,t}^*\Bigr)}_{\displaystyle\text{cost}(\mathcal{P}_k)}
+    \label{eq:primal_decomp}
+\end{equation}
+
+This is the \textbf{engineering (accounting) decomposition}: each subset's
+contribution is the sum of its capital expenditure (annualised investment cost
+$c_s G_s^*$) and operational expenditure ($w_t o_s g_{s,t}^*$, fuel and
+variable costs). The partition can be drawn at any level of granularity, and
+the subset totals always sum exactly to the system cost. No knowledge of dual
+variables is required.
+
+\subsection{Dual (Revenue) Decomposition}
+\label{sec:dual_decomp}
+
+At LP optimality the KKT conditions derived in Section~\ref{sec:kkt} reveal
+an equivalent representation of every component's total cost in terms of the
+nodal prices $\lambda_{n,t}$:
+
+\begin{tcolorbox}[colback=green!5, colframe=green!40!black,
+  title={Theorem: Dual Objective Decomposition}]
+For any \textbf{extendable} component $s$ with $G_s^* > 0$ at LP optimality,
+the KKT conditions imply:
+\begin{equation}
+    \underbrace{c_s G_s^* + \sum_t w_t\, o_s\, g_{s,t}^*}_{\text{total cost of }s}
+    \;=\;
+    \underbrace{\sum_t w_t\, \lambda_{n(s),t}\, g_{s,t}^*}_{\text{revenue of }s\text{ at nodal prices}}
+    \label{eq:dual_decomp_component}
+\end{equation}
+Consequently, for a system where all capacity is extendable:
+\begin{equation}
+    \text{obj}^*
+    \;=\;
+    \sum_s \sum_t w_t\, \lambda_{n(s),t}\, g_{s,t}^*
+    \;=\;
+    \sum_k \underbrace{\sum_{s \in \mathcal{P}_k}
+      \sum_t w_t\, \lambda_{n(s),t}\, g_{s,t}^*}_{\displaystyle\text{revenue}(\mathcal{P}_k)}
+    \label{eq:dual_decomp}
+\end{equation}
+The same partition $\mathcal{P}_k$ used in the primal decomposition~\eqref{eq:primal_decomp}
+gives the same group totals via the dual formula.
+\end{tcolorbox}
+
+\paragraph{Proof sketch.}
+Three KKT conditions combine to yield~\eqref{eq:dual_decomp_component}:
+\begin{itemize}
+    \item \textbf{Investment equilibrium} \eqref{eq:stat_cap_s}:
+          $c_s = \sum_t \bar{\mu}_{s,t}$, so
+          $c_s G_s^* = \sum_t \bar{\mu}_{s,t} G_s^*$.
+    \item \textbf{Complementary slackness} \eqref{eq:cs2}: $\bar{\mu}_{s,t} > 0$
+          forces $g_{s,t}^* = G_s^*$, hence
+          $\bar{\mu}_{s,t} G_s^* = \bar{\mu}_{s,t} g_{s,t}^*$ always holds.
+    \item \textbf{Dispatch stationarity} \eqref{eq:stat_gen}:
+          $\lambda_{n,t} = w_t o_s + \bar{\mu}_{s,t}$ whenever $g_{s,t}^* > 0$
+          (complementary slackness \eqref{eq:cs1} sets
+          $\underline{\mu}_{s,t} = 0$ there).
+\end{itemize}
+Combining:
+\[
+    c_s G_s^* + \sum_t w_t\, o_s\, g_{s,t}^*
+    = \sum_t \bar{\mu}_{s,t}\, g_{s,t}^* + \sum_t w_t\, o_s\, g_{s,t}^*
+    = \sum_t \bigl(\bar{\mu}_{s,t} + w_t\, o_s\bigr)\, g_{s,t}^*
+    = \sum_t \lambda_{n,t}\, g_{s,t}^* \quad\square
+\]
+The result extends to generalised links, multi-carrier links, and lines via
+analogous stationarity conditions (Sections~\ref{sec:multilink}--\ref{sec:lcop_multilink}).
+A complete proof with numerical illustration is in Section~\ref{sec:lcop_proof}.
+
+\subsection{Rents and the General Case}
+
+For a \textbf{fixed-capacity} component ($G_s$ is a given parameter, not an
+optimisation variable), the investment equilibrium does not exist: no
+stationarity condition with respect to $G_s$ is imposed. Dispatch stationarity
+and complementary slackness still hold, giving:
+\begin{equation}
+    \sum_t w_t\, o_s\, g_{s,t}^*
+    = \sum_t w_t\, \lambda_{n(s),t}\, g_{s,t}^*
+      - \underbrace{\sum_t \bar{\mu}_{s,t}\, G_s}_{\displaystyle r_s \;\geq\; 0}
+    \label{eq:fixed_cap_decomp}
+\end{equation}
+
+The term $r_s = \sum_t \bar{\mu}_{s,t} G_s \geq 0$ is the
+\textbf{infra-marginal rent}: the excess of market revenue over operating cost
+for a fixed-capacity unit that runs below the price-setting marginal cost.
+For the general mixed system (some extendable, some fixed):
+\begin{equation}
+    \text{obj}^*
+    = \sum_s \sum_t w_t\, \lambda_{n(s),t}\, g_{s,t}^*
+      - \sum_{s\;\text{fixed}} r_s
+    \label{eq:general_decomp}
+\end{equation}
+
+\begin{tcolorbox}[colback=blue!5, colframe=blue!40!black,
+  title={Two views of the same total cost}]
+\begin{itemize}
+    \item \textbf{Primal view --- ``what each plant spends''}:
+          operational cost plus capital repayment.  Always exact; requires
+          only primal variables.
+    \item \textbf{Dual view --- ``what the market pays each plant''}:
+          revenue at nodal prices $\lambda_{n,t}$, minus the infra-marginal rent
+          retained by fixed-capacity owners.  Requires LP optimality.
+    \item \textbf{Extendable components} (long-run equilibrium): the two views
+          coincide --- zero-profit.  The competitive market price signal
+          $\lambda_{n,t}$ exactly recovers each component's total cost.
+    \item \textbf{Fixed-capacity components}: market revenue exceeds operating
+          cost by the infra-marginal rent $r_s$.  This rent is invisible in
+          the primal decomposition but is the primary signal driving new
+          investment decisions.
+\end{itemize}
+\end{tcolorbox}
+
+\paragraph{Connection to the KKT conditions.}
+The dual decomposition~\eqref{eq:dual_decomp} holds \emph{because} the KKT
+conditions are satisfied at optimality.  The nodal prices $\lambda_{n,t}$,
+dispatch rents $\bar{\mu}_{s,t}$, congestion rents $\bar{\mu}^{\pm}_{l,t}$,
+and intertemporal storage values $\xi_{k,t}$ are the mechanism that makes the
+dual revenue equal the primal cost, exactly, for every optimally-invested
+component.  Understanding \emph{which constraints bind} --- and therefore
+which multipliers are non-zero --- is the key to understanding the cost
+structure, investment incentives, and price formation in the optimised system.
+The rest of this document interprets the KKT multipliers for each component
+type and shows what each one signals economically.
+
+% ============================================================
+\section{Role of Binding Constraints}
+\label{sec:binding}
+% ============================================================
+
+\subsection{Complementary Slackness and Economic Scarcity}
+
+Complementary slackness~\eqref{eq:cs1}--\eqref{eq:cs4} gives a precise
+condition: a dual variable can only be non-zero when its associated
+constraint holds with equality (is \textbf{binding}).
+
+\begin{itemize}
+    \item \textbf{Not binding} (slack): dual is zero, no contribution to price formation.
+    \item \textbf{Binding}: dual $\ge 0$, actively shapes prices and investment signals.
+\end{itemize}
+
+A binding constraint signals that the system is \emph{scarce} in the
+resource governed by that constraint. The dual variable measures exactly
+how much the total system cost would decrease if that constraint were relaxed
+by one unit --- the \textbf{shadow price} or \textbf{rent} of that constraint.
+
+\subsection{Types of Rent}
+
+\paragraph{Infra-marginal rent ($\bar{\mu}_{s,t}$).}
+A generator running at full capacity when a more expensive unit sets the
+price earns a rent $\bar{\mu}_{s,t} = \lambda_{n,t} - w_t\, o_s > 0$.
+The system would like more output from this cheap unit but cannot get it
+(capacity binding).
+
+\paragraph{Congestion rent ($\bar{\mu}^{\pm}_{l,t}$).}
+A congested line earns a rent equal to the nodal price difference between
+its endpoints. This rent measures the value of moving one additional MW
+across the congested path.
+
+\paragraph{Intertemporal rent ($\xi_t$).}
+Storage units earn a rent by shifting cheap energy to expensive hours.
+This intertemporal rent propagates across snapshots through the state-of-energy
+evolution constraint (see Section~\ref{sec:storage_kkt}).
+
+\subsection{Zero-Profit Conditions}
+\label{sec:zero_profit}
+
+The zero-profit condition is the stationarity equation
+\eqref{eq:stat_dispatch} evaluated when neither bound is binding
+($\bar{\mu}_{s,t} = \underline{\mu}_{s,t} = 0$):
+\begin{equation}
+    \lambda_{n^-(s),t} = \eta_s\, \lambda_{n^+(s),t} + w_t\, o_s
+    \label{eq:zero_profit_general}
+\end{equation}
+
+\textbf{Interpretation:} the value of the input equals the efficiency-weighted
+value of the output plus variable cost. A freely dispatched converter earns
+exactly zero profit: revenue equals production cost.
+
+Any deviation from \eqref{eq:zero_profit_general} is evidence of a binding
+constraint:
+\begin{itemize}
+    \item $\lambda_{n^+(s),t} > \eta_s^{-1}(\lambda_{n^-(s),t} - w_t o_s)$:
+          output price exceeds cost --- capacity binding
+          ($\bar{\mu}_{s,t} > 0$, earning infra-marginal rent)
+    \item $\lambda_{n^+(s),t} < \eta_s^{-1}(\lambda_{n^-(s),t} - w_t o_s)$:
+          output price below cost --- unit idle
+          ($\underline{\mu}_{s,t} > 0$)
+\end{itemize}
+
+\paragraph{Investment equilibrium.}
+Combining~\eqref{eq:stat_cap_s} with complementary slackness and
+\eqref{eq:stat_gen}:
+\begin{equation}
+    c_s = \sum_t \bar{\mu}_{s,t}
+        = \sum_{t:\, g_{s,t} = G_s} \bigl(\lambda_{n,t} - w_t\, o_s\bigr)
+    \label{eq:investment_eq}
+\end{equation}
+
+Capital costs are recovered through the \emph{accumulation of infra-marginal
+rents} at binding hours. No single snapshot need recover the full capital cost.
+
+% ============================================================
+\section{Extension: Storage Components}
+\label{sec:storage_extension}
+% ============================================================
+
+\subsection{Full Problem Formulation with Storage}
+
+A \textbf{store} $k$ is characterised by a state of energy $e_{k,t}$,
+charge/discharge flows $g^+_{k,t}$ and $g^-_{k,t}$, efficiencies
+$\eta^+_k,\, \eta^-_k$, power capacity $G^s_k$, and energy capacity
+$E^s_{k,\max}$.
+
+The full problem extending~\eqref{eq:full_obj} with stores is:
+
+\begin{align}
+\min \quad
+    & \sum_{s} c_s G_s + \sum_{l} c_l F_l
+      + \sum_{k} \bigl(c^P_k G^s_k + c^E_k E^s_{k,\max}\bigr)
+      + \sum_{s,t} w_t o_s g_{s,t}
+      \tag{P$'$} \label{eq:full_obj_store} \\
+\text{s.t.} \quad
+    & \eqref{eq:full_kcl}--\eqref{eq:full_flow}
+    \quad \text{(generators, links, lines as before, with storage contributing to KCL)} \notag \\
+    & e_{k,t} = e_{k,t-1} + w_t \bigl(\eta^+_k g^+_{k,t}
+      - \tfrac{1}{\eta^-_k} g^-_{k,t}\bigr)
+      \quad \forall k,t
+      \tag{SOE} \label{eq:soe} \\
+    & 0 \le g^\pm_{k,t} \le G^s_k
+      \quad \forall k,t
+      \tag{PL} \label{eq:power_lim} \\
+    & 0 \le e_{k,t} \le E^s_{k,\max}
+      \quad \forall k,t
+      \tag{EL} \label{eq:energy_lim} \\
+    & e_{k,0} = e_{k,T}
+      \quad \forall k
+      \tag{CYC} \label{eq:cycling}
+\end{align}
+
+The \textbf{cycling constraint}~\eqref{eq:cycling} requires the state of
+energy to be the same at the start and end of the optimisation horizon.
+This is essential for long-run planning models where the store must close the
+energy balance over the full year: without it, the optimiser would trivially
+fill the store at the start and drain it at the end, artificially reducing costs.
+
+\paragraph{Dual variables for storage:}
+\begin{itemize}
+    \item $\xi_{k,t}$: dual of the SOE evolution~\eqref{eq:soe} ---
+          shadow price of stored energy
+    \item $\underline{\mu}^+_{k,t},\, \bar{\mu}^+_{k,t} \ge 0$:
+          duals of charge power bounds
+    \item $\underline{\mu}^-_{k,t},\, \bar{\mu}^-_{k,t} \ge 0$:
+          duals of discharge power bounds
+    \item $\bar{\gamma}_{k,t} \ge 0$: dual of the energy upper bound
+          $e_{k,t} \le E^s_{k,\max}$
+    \item $\underline{\gamma}_{k,t} \ge 0$: dual of $e_{k,t} \ge 0$
+\end{itemize}
+
+\subsection{KKT Conditions for Storage}
+\label{sec:storage_kkt}
+
+\paragraph{Stationarity with respect to charging $g^+_{k,t}$:}
+\begin{equation}
+    -w_t\, \eta^+_k\, \lambda_{n_k,t} + \bar{\mu}^+_{k,t}
+    - \underline{\mu}^+_{k,t} + \xi_{k,t} = 0
+    \label{eq:stat_charge}
+\end{equation}
+
+\paragraph{Stationarity with respect to discharging $g^-_{k,t}$:}
+\begin{equation}
+    \frac{w_t\, \lambda_{n_k,t}}{\eta^-_k}
+    + \bar{\mu}^-_{k,t} - \underline{\mu}^-_{k,t} - \xi_{k,t} = 0
+    \label{eq:stat_discharge}
+\end{equation}
+
+Here $\xi_{k,t}$ is the shadow price of stored energy at time $t$.
+
+\paragraph{Intertemporal propagation of $\xi_{k,t}$:}
+The SOE constraint~\eqref{eq:soe} links consecutive time steps, giving:
+\begin{equation}
+    \xi_{k,t} = \xi_{k,t+1} + \bar{\gamma}_{k,t} - \underline{\gamma}_{k,t}
+    \label{eq:xi_propagation}
+\end{equation}
+
+The shadow price of stored energy at $t$ equals the shadow price one period
+ahead, adjusted by the energy capacity dual. When the reservoir is neither
+full nor empty ($\bar{\gamma}_{k,t} = \underline{\gamma}_{k,t} = 0$),
+$\xi_{k,t} = \xi_{k,t+1}$: the value of an extra unit of stored energy is
+constant over that period.
+
+\paragraph{Combining charge and discharge stationarity.}
+When storage is actively cycling (neither power constraint binding):
+\begin{equation}
+    w_{t^-}\, \lambda_{n_k,t^-}
+    = \frac{\xi_{k,t^-}}{\eta^-_k}
+    \qquad \text{and} \qquad
+    w_{t^+}\, \lambda_{n_k,t^+}
+    = \frac{\xi_{k,t^+}}{\eta^+_k}
+\end{equation}
+Combining, an ideal round trip from charging hour $t^+$ to discharging hour $t^-$:
+\begin{equation}
+    \lambda_{n_k,t^-} \ge \frac{\lambda_{n_k,t^+}}{\eta^+_k\,\eta^-_k}
+    \label{eq:arbitrage}
+\end{equation}
+Storage earns an intertemporal rent by arbitraging between cheap and expensive
+hours. The round-trip efficiency $\eta^+_k \eta^-_k < 1$ sets the minimum price
+ratio required for profitable cycling.
+
+\paragraph{Capacity stationarity for power $G^s_k$:}
+\begin{equation}
+    c^P_k = \sum_t \bigl(\bar{\mu}^+_{k,t} + \bar{\mu}^-_{k,t}\bigr)
+    \label{eq:cap_stat_power}
+\end{equation}
+
+\paragraph{Capacity stationarity for energy $E^s_{k,\max}$:}
+\begin{equation}
+    c^E_k = \sum_t \bar{\gamma}_{k,t}
+    \label{eq:cap_stat_energy}
+\end{equation}
+
+% ============================================================
+\section{Interpretation of Stationary Conditions}
+\label{sec:stationary}
+% ============================================================
+
+\subsection{Dispatch: price decomposition}
+
+From the stationarity condition~\eqref{eq:stat_gen}, the nodal price decomposes
+into variable cost, infra-marginal rent, and below-cost shadow:
+
+\begin{itemize}
+    \item $0 < g_{s,t} < G_s$: $\bar{\mu}_{s,t} = \underline{\mu}_{s,t} = 0$
+          $\Rightarrow \lambda_{n,t} = w_t\, o_s$ \quad (marginal unit; zero rent)
+    \item $g_{s,t} = G_s$: $\bar{\mu}_{s,t} > 0$
+          $\Rightarrow \lambda_{n,t} > w_t\, o_s$ \quad (infra-marginal rent)
+    \item $g_{s,t} = 0$: $\underline{\mu}_{s,t} > 0$
+          $\Rightarrow \lambda_{n,t} < w_t\, o_s$ \quad (too expensive)
+\end{itemize}
+
+\subsection{Generator capacity: investment equilibrium}
+
+From the investment equilibrium~\eqref{eq:investment_eq}, capital costs are
+recovered through infra-marginal rents at binding hours:
+$c_s = \sum_{t:\, g_{s,t} = G_s} (\lambda_{n,t} - w_t o_s)$.
+
+\subsection{Line capacity: transmission investment equilibrium}
+
+From~\eqref{eq:stat_cap_l}, the line capital cost equals the sum of congestion
+rents over all snapshots.
+The congestion rent $\bar{\mu}^+_{l,t}$ measures the nodal price difference
+across the congested line. In a two-node setting (or radial network):
+$\bar{\mu}^+_{l,t} = \lambda_{n^-(l),t} - \lambda_{n^+(l),t}$ when $f_{l,t} = F_l$.
+
+\subsection{Storage: intertemporal arbitrage}
+
+From~\eqref{eq:cap_stat_power} and \eqref{eq:cap_stat_energy}:
+\begin{itemize}
+    \item Power capacity is sized so that total binding-hour power rents equal $c^P_k$
+    \item Energy capacity is sized so that total full-reservoir rents equal $c^E_k$
+    \item The value of stored energy $\xi_{k,t}$ propagates across time via
+          \eqref{eq:xi_propagation}
+\end{itemize}
+
+\subsection{Generalised link: full stationarity}
+
+From~\eqref{eq:stat_dispatch} (and the zero-profit form~\eqref{eq:zero_profit_general}),
+the input price equals the efficiency-weighted output price plus variable cost plus rent.
+When freely dispatched ($\bar{\mu}_{s,t} = \underline{\mu}_{s,t} = 0$) this reduces to
+the zero-profit condition~\eqref{eq:zero_profit_general}.
+
+% ============================================================
+\section{Nodal Marginal Prices}
+\label{sec:lmp}
+% ============================================================
+
+The dual $\lambda_{n,t}$ of the nodal balance constraint is the
+\textbf{Locational Marginal Price (LMP)} at node $n$ and snapshot $t$~\cite{Stoft2002,Varian1992}:
+\begin{equation}
+    \lambda_{n,t} = \frac{\partial \text{Total Cost}^*}{\partial d_{n,t}}
+\end{equation}
+
+It is the marginal cost of supplying one additional MW of demand at node $n$
+at time $t$.
+
+\paragraph{Generic bus.}
+Consider a bus $n$ with:
+\begin{itemize}
+    \item Generators $s \in \mathcal{S}_n$ (injecting)
+    \item Demand $d_{n,t}$ (withdrawing)
+    \item Outgoing links $s \in \mathcal{L}^{\text{out}}_n$ (withdrawing $g_{s,t}$ from bus $n$)
+    \item Incoming links $s \in \mathcal{L}^{\text{in}}_n$ (injecting $\eta_s g_{s,t}$ into bus $n$)
+    \item Passive line connections (net flow $\sum_l K_{nl} f_{l,t}$)
+    \item Storage units $k \in \mathcal{K}_n$ (charging $-g^+_{k,t}$, discharging $+g^-_{k,t}$)
+\end{itemize}
+
+The nodal balance at $n$ is:
+\begin{equation}
+    \sum_{s \in \mathcal{S}_n} g_{s,t}
+    + \sum_{k \in \mathcal{K}_n} (g^-_{k,t} - g^+_{k,t})
+    + \sum_{s \in \mathcal{L}^{\text{in}}_n} \eta_s g_{s,t}
+    - \sum_{s \in \mathcal{L}^{\text{out}}_n} g_{s,t}
+    + \sum_l K_{nl} f_{l,t}
+    = d_{n,t}
+    \label{eq:full_balance}
+\end{equation}
+
+The LMP $\lambda_{n,t}$ is the shadow price of this constraint and aggregates
+information from \emph{all} components connected to the bus.
+
+\paragraph{What $\lambda_{n,t}$ reflects.}
+\begin{itemize}
+    \item \textbf{Short-run marginal cost}: variable cost of the marginal generator
+    \item \textbf{Infra-marginal rents}: upward pressure from units at full capacity
+    \item \textbf{Congestion rents}: price wedge from binding line flow constraints
+    \item \textbf{Intertemporal rents}: value of stored energy from storage
+    \item \textbf{KVL coupling}: in meshed networks, even uncongested lines
+          contribute to price differences via the KVL duals $\kappa_{c,t}$
+\end{itemize}
+
+\paragraph{Long-run equilibrium.}
+At long-run equilibrium, each invested technology satisfies its investment
+equilibrium condition. The system-wide price signal $\lambda_{n,t}$ integrates
+to recover all capital costs --- no investment earns more or less than its
+annualised cost in expectation over the optimisation horizon.
+
+\paragraph{In PyPSA.}
+Nodal marginal prices are accessible as \texttt{n.buses\_t.marginal\_price}
+after solving. Each row is a snapshot, each column is a bus.
+
+% ============================================================
+\section{Examples}
+\label{sec:examples}
+% ============================================================
+
+% ============================================================
+\subsection{Single Node: Baseload and Peaker Competition, LCOP Equivalence}
+\label{sec:single_node}
+% ============================================================
+
+\subsubsection{Setup}
+
+A single bus with two extendable generators:
+\begin{itemize}
+    \item Generator 1 (baseload): high capital cost $c_1$, low variable cost $o_1$
+    \item Generator 2 (peaker): low capital cost $c_2$, high variable cost $o_2$
+\end{itemize}
+with $o_1 < o_2$ and $c_1 > c_2$.
+
+\begin{align}
+\min \quad
+    & c_1 G_1 + c_2 G_2
+      + \sum_t w_t (o_1 g_{1,t} + o_2 g_{2,t}) \\
+\text{s.t.} \quad
+    & g_{1,t} + g_{2,t} = d_t \quad \forall t \\
+    & 0 \le g_{s,t} \le G_s \quad \forall s,t
+\end{align}
+
+\subsubsection{KKT Conditions}
+
+\paragraph{Dispatch stationarity.}
+\begin{itemize}
+    \item Off-peak: generator 1 at capacity ($g_{1,t} = G_1$), generator 2 partially loaded:
+          $\lambda_t = w_t\, o_2$ (peaker sets the price).
+          Generator 1 earns rent $\bar{\mu}_{1,t} = \lambda_t - w_t\, o_1 = w_t(o_2 - o_1) > 0$.
+    \item Peak: generator 2 also at capacity, price may be pushed higher by scarcity.
+    \item When generator 2 is the marginal unit ($0 < g_{2,t} < G_2$, $\bar{\mu}_{2,t}=0$):
+          $\lambda_t = w_t\, o_2$.
+\end{itemize}
+
+\paragraph{Capacity stationarity for generator 1:}
+\begin{equation}
+    c_1 = \sum_t \bar{\mu}_{1,t}
+        = \sum_{t:\, g_{1,t} = G_1} (\lambda_t - w_t\, o_1)
+        = \sum_{t:\, g_{1,t} = G_1} w_t (o_2 - o_1)
+\end{equation}
+
+Generator 1 recovers capital cost through the price spread $o_2 - o_1$
+earned whenever it runs at full capacity while the peaker sets the price.
+
+\paragraph{Capacity stationarity for generator 2:}
+\begin{equation}
+    c_2 = \sum_{t:\, g_{2,t} = G_2} (\lambda_t - w_t\, o_2)
+\end{equation}
+
+The peaker is at full capacity only during the highest-demand hours, when both
+generators are fully loaded and no unit has slack.
+In those \textbf{scarcity hours} the price rises above $w_t o_2$ --- there is no
+freely dispatched unit to pin the price at its variable cost --- and the peaker
+earns the difference $\lambda_t - w_t o_2 > 0$ as an infra-marginal rent.
+Summed over the (typically few) scarcity snapshots, these rents must exactly
+cover $c_2$. A peaker with low capital cost therefore does not need to run
+continuously; it recovers its investment through infrequent but high-priced events.
+
+\subsubsection{LCOP Equals Energy-Weighted Nodal Price}
+\label{sec:lcop_proof}
+
+\begin{tcolorbox}[colback=green!5, colframe=green!40!black,
+  title={Result: LCOP $=$ energy-weighted LMP}]
+
+For any optimally invested generator $s$ (with $G_s > 0$):
+\begin{equation}
+    \boxed{
+    \mathrm{LCOP}_s
+    \;=\;
+    \frac{c_s\, G_s + \displaystyle\sum_t w_t\, o_s\, g_{s,t}}
+         {\displaystyle\sum_t w_t\, g_{s,t}}
+    \;=\;
+    \frac{\displaystyle\sum_t w_t\, g_{s,t}\, \pi_{n,t}}
+         {\displaystyle\sum_t w_t\, g_{s,t}}
+    \;\equiv\; \bar{\pi}^{\mathrm{energy}}_{n,s}
+    }
+    \label{eq:lcop_equals_energy_weighted_lmp}
+\end{equation}
+where $\pi_{n,t} = \lambda_{n,t} / w_t$ is the nodal price in \euro/MWh.
+\end{tcolorbox}
+
+\paragraph{Proof.}
+Step 1: expand the numerator of LCOP using the investment equilibrium
+condition \eqref{eq:stat_cap_s}:
+\begin{equation}
+    c_s G_s = \Bigl(\sum_t \bar{\mu}_{s,t}\Bigr) G_s
+\end{equation}
+By complementary slackness~\eqref{eq:cs2}, $\bar{\mu}_{s,t} > 0$ implies
+$g_{s,t} = G_s$, so:
+\begin{equation}
+    c_s G_s = \sum_t \bar{\mu}_{s,t}\, G_s = \sum_t \bar{\mu}_{s,t}\, g_{s,t}
+    \label{eq:cs_trick}
+\end{equation}
+Step 2: substitute into the LCOP numerator:
+\begin{equation}
+    c_s G_s + \sum_t w_t o_s g_{s,t}
+    = \sum_t \bigl(\bar{\mu}_{s,t} + w_t o_s\bigr)\, g_{s,t}
+\end{equation}
+Step 3: apply the dispatch stationarity \eqref{eq:stat_gen}.
+When $g_{s,t} > 0$, complementary slackness gives $\underline{\mu}_{s,t} = 0$, so:
+\begin{equation}
+    \bar{\mu}_{s,t} + w_t o_s = \lambda_{n,t}
+    \qquad \text{whenever } g_{s,t} > 0
+\end{equation}
+Step 4: since only snapshots with $g_{s,t} > 0$ contribute to the sum:
+\begin{equation}
+    c_s G_s + \sum_t w_t o_s g_{s,t}
+    = \sum_t \lambda_{n,t}\, g_{s,t}
+    = \sum_t w_t\, g_{s,t}\, \pi_{n,t}
+\end{equation}
+Dividing by $\sum_t w_t g_{s,t}$ gives~\eqref{eq:lcop_equals_energy_weighted_lmp}. $\square$
+
+\begin{tcolorbox}[colback=blue!5, colframe=blue!40!black, title={Scope of the result}]
+The result holds for any extendable component ($G_s > 0$, $c_s > 0$) --- generator, link,
+multi-carrier link --- as long as the LP is at optimality.  It does \emph{not} hold for
+fixed-capacity components (no investment equilibrium condition exists) or components not
+invested ($G_s = 0$).
+\end{tcolorbox}
+
+\paragraph{Individual zero-profit condition for each generator.}
+Result~\eqref{eq:lcop_equals_energy_weighted_lmp} holds for each optimally
+invested generator \emph{independently}: the formula is an individual
+break-even condition, not a statement that competing generators share the
+same LCOP.
+
+In the baseload/peaker example, the two LCOPs are generally \emph{different}:
+the baseload generator produces in cheap off-peak hours (facing lower average
+prices) while the peaker produces only at high-price peak hours (facing higher
+average prices). Each breaks even in its own niche --- neither needs to match
+the other's LCOP. This coexistence is possible precisely because they serve
+different time periods: the baseload would not cover the peak, and the peaker
+would be too expensive for continuous operation.
+
+\paragraph{LCOP vs.\ production-weighted average of $\pi_{n,t}$.}
+The result~\eqref{eq:lcop_equals_energy_weighted_lmp} already answers this:
+the LCOP and the production-weighted average nodal price are \textbf{the same
+quantity} at optimum --- that equality is exactly what was proved.
+In other words, if you compute $\sum_t w_t g_{s,t}\,\pi_{n,t} \big/
+\sum_t w_t g_{s,t}$ directly from PyPSA output, you obtain the LCOP.
+
+The reason individual snapshots can still have $\pi_{n,t}$ above or below
+the LCOP is that the weighting by $g_{s,t}$ does the work: snapshots where
+$s$ is at full capacity ($g_{s,t} = G_s$, $\pi_{n,t}$ above marginal cost)
+and snapshots where $s$ is the marginal unit ($\pi_{n,t} = w_t o_s$) all
+enter the average, and the investment equilibrium~\eqref{eq:stat_cap_s}
+guarantees they balance out to the LCOP exactly.
+
+% ============================================================
+\subsection{Three-Node System with Transmission Investment (Triangle)}
+\label{sec:triangle}
+% ============================================================
+
+\subsubsection{Setup}
+
+Three buses A, B, C connected by three extendable lines forming a triangle
+(the simplest meshed network). $N = 3$, $L = 3$, so there is
+$L - N + 1 = 1$ independent cycle.
+
+Label the lines: $l_1$ (A--B), $l_2$ (B--C), $l_3$ (A--C).
+One generator per bus with variable costs $o_A < o_B < o_C$.
+
+\paragraph{KVL constraint (one per snapshot).}
+Choosing the triangle as the independent cycle, with consistent orientation:
+\begin{equation}
+    x_1 f_{1,t} + x_2 f_{2,t} - x_3 f_{3,t} = 0
+    \quad \forall t
+    \label{eq:triangle_kvl}
+\end{equation}
+where $x_i$ is the reactance of line $l_i$.
+The sign of $C_{3c} = -1$ reflects that $l_3$ is traversed in reverse by
+the chosen cycle orientation.
+
+\paragraph{Nodal balances.}
+\begin{align}
+    \text{Node A:} & \quad g_{A,t} - f_{1,t} - f_{3,t} = d_{A,t} \\
+    \text{Node B:} & \quad g_{B,t} + f_{1,t} - f_{2,t} = d_{B,t} \\
+    \text{Node C:} & \quad g_{C,t} + f_{2,t} + f_{3,t} = d_{C,t}
+\end{align}
+(Using incidence matrix sign convention: $+1$ if line ends at bus, $-1$ if line starts at bus.)
+
+\subsubsection{KKT Conditions}
+
+\paragraph{Stationarity for line flows.}
+From \eqref{eq:stat_flow} applied to each line, with the single cycle dual $\kappa_t$:
+
+\begin{align}
+    l_1\,(A\text{--}B): &\quad \lambda_{A,t} - \lambda_{B,t}
+    = \kappa_t\, x_1 + \bar{\mu}^+_{1,t} - \bar{\mu}^-_{1,t} \\
+    l_2\,(B\text{--}C): &\quad \lambda_{B,t} - \lambda_{C,t}
+    = \kappa_t\, x_2 + \bar{\mu}^+_{2,t} - \bar{\mu}^-_{2,t} \\
+    l_3\,(A\text{--}C): &\quad \lambda_{A,t} - \lambda_{C,t}
+    = -\kappa_t\, x_3 + \bar{\mu}^+_{3,t} - \bar{\mu}^-_{3,t}
+\end{align}
+
+Note the sign flip on $l_3$ because $C_{3c} = -1$.
+
+\paragraph{Uncongested triangle.}
+If all lines are uncongested ($\bar{\mu}^{\pm}_{l,t} = 0$):
+\begin{align}
+    \lambda_{A,t} - \lambda_{B,t} &= \kappa_t\, x_1 \\
+    \lambda_{B,t} - \lambda_{C,t} &= \kappa_t\, x_2 \\
+    \lambda_{A,t} - \lambda_{C,t} &= -\kappa_t\, x_3
+\end{align}
+Adding the first two: $\lambda_{A,t} - \lambda_{C,t} = \kappa_t(x_1 + x_2)$.
+From the third: $\lambda_{A,t} - \lambda_{C,t} = -\kappa_t x_3$.
+For consistency: $\kappa_t(x_1 + x_2 + x_3) = 0$, so $\kappa_t = 0$.
+
+\textbf{Key result for an uncongested meshed network:}
+when no lines are congested, $\kappa_t = 0$ and all nodal prices are
+equal ($\lambda_{A,t} = \lambda_{B,t} = \lambda_{C,t}$). The physics
+enforced by the KVL constraint leads to price equalisation when
+there is no transmission scarcity.
+
+\paragraph{Congested line $l_1$.}
+If $f_{1,t} = F_1$ ($\bar{\mu}^+_{1,t} > 0$) while $l_2$ and $l_3$
+are uncongested:
+\begin{align}
+    \lambda_{A,t} - \lambda_{B,t} &= \kappa_t\, x_1 + \bar{\mu}^+_{1,t} \\
+    \lambda_{B,t} - \lambda_{C,t} &= \kappa_t\, x_2 \\
+    \lambda_{A,t} - \lambda_{C,t} &= -\kappa_t\, x_3
+\end{align}
+Now the price differences are non-zero and the KVL dual $\kappa_t \ne 0$
+in general. The congestion on $l_1$ propagates through the physics to
+create price differences at all buses.
+
+\paragraph{Transmission investment equilibrium.}
+From~\eqref{eq:stat_cap_l}, the capital cost of each line is recovered through
+congestion rents accumulated over all congested snapshots. Lines that are never
+congested at optimum will not be invested (or are already sized beyond their
+binding level).
+
+% ============================================================
+\subsection{Storage Investment with Cycling Constraint}
+\label{sec:storage_example}
+% ============================================================
+
+\subsubsection{Setup}
+
+Single node, two generators (baseload 1 and peaker 2), and a battery storage
+unit with extendable power capacity $G^s$ and energy capacity $E^s_{\max}$.
+
+The cycling constraint~\eqref{eq:cycling} requires $e_0 = e_T$.
+In practice this means the battery cannot start full and end empty (or vice versa)
+over the planning horizon. For annual planning, this enforces that the battery
+is in the same state at the end of the year as it was at the beginning.
+
+\subsubsection{KKT Conditions}
+
+\paragraph{Charge/discharge arbitrage.}
+The shadow price $\xi_t$ of stored energy propagates via~\eqref{eq:xi_propagation}.
+When storage cycles between a cheap hour $t^+$ and expensive hour $t^-$:
+\begin{itemize}
+    \item At $t^+$ (charging, neither bound binding): $w_{t^+} \lambda_{t^+} = \xi_{t^+} / \eta^+$
+    \item At $t^-$ (discharging, neither bound binding): $w_{t^-} \lambda_{t^-} = \xi_{t^-} \eta^-$
+    \item Over a full cycle: $\lambda_{t^-} / \lambda_{t^+} \ge 1/(\eta^+ \eta^-)$
+\end{itemize}
+
+\paragraph{Investment equilibrium.}
+From~\eqref{eq:cap_stat_power} and~\eqref{eq:cap_stat_energy}, power capacity is
+sized to the total hours when the charge or discharge rate is binding; energy
+capacity is sized to the total hours when the battery is full.
+
+\paragraph{Effect of the cycling constraint.}
+The cycling constraint has a dual variable $\xi_{\text{cyc}}$ (the shadow price
+of the constraint $e_0 = e_T$). This initialises the chain of
+$\xi_t$ values: the cycling dual anchors the intertemporal price chain so that
+the storage correctly values its energy across the full year. Without this
+constraint, the terminal condition would be free and storage could artificially
+end the year depleted, creating incorrect price signals.
+
+\paragraph{Economic interpretation.}
+A battery optimally sized will:
+\begin{enumerate}
+    \item Earn enough arbitrage profit (charge cheap, discharge expensive) to
+          recover power capital cost $c^P$ through power rents
+    \item Earn enough full-reservoir rent to recover energy capital cost $c^E$
+    \item The cycling constraint ensures the arbitrage value is computed over
+          a closed annual cycle, consistent with the annual capital cost annualisation
+\end{enumerate}
+
+% ============================================================
+\subsection{Multi-carrier Link: One Input, Two Outputs}
+\label{sec:multilink}
+% ============================================================
+
+\subsubsection{Setup}
+
+A \textbf{multi-carrier conversion link} with one primary input and two outputs
+--- representing for example a CHP plant (electricity + heat), a Sabatier reactor
+(electricity + CO$_2$ $\to$ methane + oxygen), or an electrolyser with heat recovery:
+
+\begin{itemize}
+    \item Withdraws $p_{0,t}$ from input bus $b_0$ (price $\lambda_{0,t}$,
+          e.g.\ electricity)
+    \item Injects $\eta_1\, p_{0,t}$ into output bus $b_1$ (price $\lambda_{1,t}$,
+          e.g.\ methane); \texttt{efficiency} $= \eta_1 > 0$
+    \item Injects $\eta_2\, p_{0,t}$ into output bus $b_2$ (price $\lambda_{2,t}$,
+          e.g.\ heat); \texttt{efficiency2} $= \eta_2 > 0$
+\end{itemize}
+
+Note: in PyPSA, a negative efficiency means the link \emph{withdraws} from that bus
+(e.g.\ consuming CO$_2$). Here both $\eta_1, \eta_2 > 0$ so both are outputs.
+
+The nodal balances receive:
+\begin{align}
+    b_0: & \quad \ldots - p_{0,t} + \ldots = d_{0,t} \\
+    b_1: & \quad \ldots + \eta_1\, p_{0,t} + \ldots = d_{1,t} \\
+    b_2: & \quad \ldots + \eta_2\, p_{0,t} + \ldots = d_{2,t}
+\end{align}
+
+Dispatch constraint: $0 \le p_{0,t} \le G_s$, capital cost $c_s$.
+
+\subsubsection{Stationarity Condition}
+
+Taking $\partial \mathcal{L}/\partial p_{0,t} = 0$:
+\begin{equation}
+    \boxed{
+        w_t\, o_s
+        - \lambda_{0,t}
+        + \eta_1\, \lambda_{1,t}
+        + \eta_2\, \lambda_{2,t}
+        - \underline{\mu}_{s,t}
+        + \bar{\mu}_{s,t} = 0
+    }
+    \label{eq:stat_multilink}
+\end{equation}
+
+Rearranged as a value equation:
+\begin{equation}
+    \underbrace{\eta_1\, \lambda_{1,t} + \eta_2\, \lambda_{2,t}}_{\text{value of outputs}}
+    =
+    \underbrace{\lambda_{0,t}}_{\text{cost of input}}
+    -\;
+    \underbrace{w_t\, o_s}_{\text{variable cost}}
+    +\;
+    \underbrace{\bar{\mu}_{s,t} - \underline{\mu}_{s,t}}_{\text{rent}}
+    \label{eq:multilink_value}
+\end{equation}
+
+\textbf{Zero-profit condition} (when $0 < p_{0,t} < G_s$):
+\begin{equation}
+    \eta_1\, \lambda_{1,t} + \eta_2\, \lambda_{2,t}
+    = \lambda_{0,t} - w_t\, o_s
+    \label{eq:zp_multilink}
+\end{equation}
+The combined value of all outputs equals the cost of the input minus variable cost.
+This is a multi-product generalisation of the zero-profit condition
+introduced in Section~\ref{sec:zero_profit}.
+
+\subsubsection{Capacity Stationarity}
+
+From~\eqref{eq:stat_cap_s}, the capital cost of the link is recovered through
+the infra-marginal rents $\bar{\mu}_{s,t}$ earned when the link is at full capacity.
+
+\subsubsection{Economic Interpretation}
+
+\begin{itemize}
+    \item $\lambda_{0,t}$: opportunity cost of the input (e.g.\ electricity price)
+    \item $\eta_1 \lambda_{1,t},\, \eta_2 \lambda_{2,t}$: per-unit revenue
+          from each output, valued at market prices
+    \item $w_t o_s$: variable operating cost
+    \item $\bar{\mu}_{s,t} > 0$: infra-marginal rent when at full capacity
+    \item $\underline{\mu}_{s,t} > 0$: shadow cost when idle (link not competitive)
+\end{itemize}
+
+A reference to Section~\ref{sec:lcop_multilink} where LCOP for multi-carrier links
+is derived in detail.
+
+% ============================================================
+\subsection{Levelized Cost of Production for Multi-carrier Links}
+\label{sec:lcop_multilink}
+% ============================================================
+
+\subsubsection{Motivation}
+
+Multi-carrier links model industrial processes that convert one carrier
+into (possibly multiple) products. The key economic question is: what is
+the \emph{full} cost of producing one unit of each product, and how does it
+compare to the market price? This section derives the Levelized Cost of
+Production (LCOP) for such links and connects it to the KKT multipliers.
+
+\subsubsection{LCOP for a Multi-output Link}
+
+The LCOP for the primary product (output at $b_1$, quantity $\eta_1 p_{0,t}$)
+requires attributing costs between outputs. Define the total annual cost:
+
+\begin{equation}
+    \text{Total Cost} = c_s G_s + \sum_t \bigl(w_t o_s p_{0,t}
+    + \lambda_{0,t} p_{0,t}\bigr)
+    \label{eq:total_cost}
+\end{equation}
+
+Input flows are valued at their nodal KKT prices $\lambda_{0,t}$, reflecting
+the true opportunity cost of the input to the system.
+The full LCOP for the combined output bundle, normalised to unit of primary
+input, is:
+\begin{equation}
+    \text{LCOP}_{\text{combined}} =
+    \frac{c_s G_s + \displaystyle\sum_t w_t (o_s + \lambda_{0,t}/w_t)\, p_{0,t}}
+         {\displaystyle\sum_t w_t\, p_{0,t}}
+    \label{eq:lcop_combined}
+\end{equation}
+
+\subsubsection{Allocating LCOP to Individual Products}
+
+When the link produces two outputs with prices $\lambda_{1,t}$ and
+$\lambda_{2,t}$, the revenue from output 2 acts as a \emph{cost credit}
+for output 1. The LCOP for the primary product at $b_1$ is:
+
+\begin{equation}
+    \text{LCOP}_{b_1} =
+    \frac{c_s G_s
+        + \displaystyle\sum_t \bigl(w_t o_s p_{0,t}
+        + \lambda_{0,t} p_{0,t}
+        - \eta_2\, \lambda_{2,t}\, p_{0,t}\bigr)}
+         {\displaystyle\sum_t \eta_1\, w_t\, p_{0,t}}
+    \label{eq:lcop_b1}
+\end{equation}
+
+The numerator subtracts the value of the co-product at $b_2$; the denominator
+counts only the primary output (in MWh). This follows standard multi-product
+accounting: the secondary product's market value offsets the production cost
+attributed to the primary product.
+
+\subsubsection{LCOP Equals Product-Weighted Nodal Price}
+
+By the same proof as in Section~\ref{sec:lcop_proof}, using the
+investment equilibrium~\eqref{eq:stat_cap_s} and dispatch stationarity
+\eqref{eq:stat_multilink}:
+
+\begin{equation}
+    \text{LCOP}_{b_1}
+    = \frac{\displaystyle\sum_t w_t\, (\eta_1 p_{0,t})\, \pi_{1,t}}
+           {\displaystyle\sum_t w_t\, \eta_1 p_{0,t}}
+    \equiv \bar{\pi}^{\text{prod}}_{1,s}
+    \label{eq:lcop_prod_weighted}
+\end{equation}
+
+\textbf{The LCOP of the primary product equals the product-weighted nodal price
+at the output bus $b_1$, averaged over production hours} --- where the weight
+at each snapshot is the quantity of primary product delivered,
+$w_t\,\eta_1 p_{0,t}$.
+
+This holds because of the interplay between two KKT conditions.
+The investment equilibrium~\eqref{eq:stat_cap_s} requires
+$c_s = \sum_t \bar{\mu}_{s,t}$: capital cost is recovered entirely through
+the infra-marginal rents $\bar{\mu}_{s,t}$ earned at hours when the link is
+at full capacity.
+At those same hours, complementary slackness~\eqref{eq:cs2} forces
+$g_{s,t} = G_s$, and the dispatch stationarity~\eqref{eq:stat_multilink}
+gives $\bar{\mu}_{s,t} = \eta_1\lambda_{1,t} + \eta_2\lambda_{2,t}
+- \lambda_{0,t} + w_t o_s$, i.e.\ the rent is exactly the gap between the
+output value and the full production cost at that snapshot.
+Substituting both into the LCOP numerator collapses the capital cost term
+into the price signal $\pi_{1,t}$, yielding the product-weighted average.
+
+\subsubsection{Competing Links on the Same Bus}
+
+This situation is structurally identical to the baseload/peaker competition
+of Section~\ref{sec:single_node}: two technologies serving the same product
+bus coexist at long-run optimum because they occupy \textbf{different time
+niches}. Technology $A$ (e.g.\ electrolysis) is cheap when its input is
+cheap (low electricity price); technology $B$ (e.g.\ SMR) is cheap when
+$A$'s input is expensive. Neither can replace the other at all hours.
+
+Suppose two links $A$ and $B$ (e.g.\ two hydrogen production technologies)
+both deliver their output to bus $b_1$. At long-run optimum with both
+$G_A > 0$ and $G_B > 0$, the individual zero-profit condition holds for each:
+
+\begin{equation}
+    \text{LCOP}_A = \bar{\pi}^{\text{prod}}_{1,A}, \qquad
+    \text{LCOP}_B = \bar{\pi}^{\text{prod}}_{1,B}
+\end{equation}
+
+These two LCOPs are \textbf{generally not equal to each other}: each is the
+product-weighted average of $\pi_{1,t}$ taken over its \emph{own} production
+hours. Technology $A$ produces mainly when prices are low (setting the price
+itself as the marginal unit), while $B$ produces mainly when prices are higher.
+Their respective product-weighted averages reflect these different price
+environments, so LCOP$_A \ne$ LCOP$_B$ in general --- just as the baseload
+and peaker LCOPs differ in Section~\ref{sec:single_node}.
+
+What \emph{is} common: both individually break even over the year.
+Neither earns supra-normal profit nor suffers a loss at long-run optimum.
+If either technology were unprofitable in its niche (its product-weighted
+average price fell below its LCOP), investment in it would be driven to zero.
+
+\paragraph{LCOP vs.\ instantaneous shadow price $\pi_{1,t}$.}
+The nodal price $\pi_{1,t}$ is a snapshot quantity; the LCOP is a lifecycle
+average. At any given snapshot, $\pi_{1,t}$ can be:
+\begin{itemize}
+    \item \textbf{Equal to the SRMC of technology $s$}: $s$ is the marginal
+          unit ($\bar{\mu}_{s,t} = 0$, zero rent at that snapshot)
+    \item \textbf{Above the SRMC of $s$}: $s$ is at full capacity
+          ($\bar{\mu}_{s,t} > 0$, earning infra-marginal rent)
+    \item \textbf{Irrelevant}: $s$ is idle ($\underline{\mu}_{s,t} > 0$)
+\end{itemize}
+The zero-profit condition says precisely that these snapshot deviations
+average out to zero over the year: LCOP$_s$ = product-weighted average of
+$\pi_{1,t}$. The capital cost is recovered through the \emph{accumulation}
+of infra-marginal rents at binding hours~\eqref{eq:stat_cap_s} --- not
+from any single snapshot.
+
+\paragraph{Practical computation in PyPSA.}
+For link $s$ delivering to bus $b_1$:
+\begin{equation}
+    \text{LCOP}_s =
+    \frac{c_s G_s + \displaystyle\sum_t w_t (o_s + \pi_{0,t}) p_{0,t}
+          - \displaystyle\sum_t w_t \eta_2\, \pi_{2,t}\, p_{0,t}}
+         {\displaystyle\sum_t w_t\, \eta_1 p_{0,t}}
+\end{equation}
+where $\pi_{i,t} = \lambda_{i,t}/w_t$ is the nodal price in \euro/MWh.
+
+% ============================================================
+\subsection{CO\textsubscript{2} Emission Cap via Store}
+\label{sec:co2store}
+% ============================================================
+
+\subsubsection{Setup}
+
+In PyPSA-Eur, the CO$_2$ emission cap is implemented as a \textbf{physical store
+component} on a dedicated CO$_2$ bus.
+
+\begin{itemize}
+    \item A \textbf{CO$_2$ bus} $b_{\text{CO}_2}$ with nodal price
+          $\lambda_{\text{CO}_2, t}$
+    \item A \textbf{CO$_2$ store} with energy capacity $E^{\text{CO}_2}_{\max}$
+          (the emission budget in tCO$_2$), non-cyclic state of charge, zero cost
+    \item Every emitting generator or link $s$ with emission intensity
+          $\rho_s$ (tCO$_2$/MWh$_{\text{th}}$) and efficiency $\eta_s$ injects
+          $(\rho_s / \eta_s)\, g_{s,t}$ tCO$_2$ into $b_{\text{CO}_2}$ per snapshot
+\end{itemize}
+
+The CO$_2$ store accumulates emissions:
+\begin{equation}
+    e^{\text{CO}_2}_{t+1} = e^{\text{CO}_2}_t
+        + \sum_s w_t \frac{\rho_s}{\eta_s}\, g_{s,t}
+    \quad \forall t
+    \label{eq:co2_soe}
+\end{equation}
+
+with capacity constraint:
+\begin{equation}
+    0 \le e^{\text{CO}_2}_t \le E^{\text{CO}_2}_{\max}
+    \quad \longleftrightarrow \quad \bar{\gamma}_t \ge 0
+    \label{eq:co2_cap}
+\end{equation}
+
+\subsubsection{Modified Stationarity for Emitting Generators}
+
+\begin{equation}
+    \boxed{
+        w_t \left( o_s + \frac{\rho_s}{\eta_s}\, \lambda_{\text{CO}_2,t} \right)
+        - \lambda_{n(s),t}
+        - \underline{\mu}_{s,t} + \bar{\mu}_{s,t} = 0
+    }
+    \label{eq:stat_co2gen}
+\end{equation}
+
+The CO$_2$ price $\lambda_{\text{CO}_2,t}$ augments the effective marginal cost
+of each emitting generator:
+\begin{equation}
+    \lambda_{n(s),t} = w_t
+    \underbrace{\left( o_s + \frac{\rho_s}{\eta_s}\,
+    \lambda_{\text{CO}_2,t} \right)}_{\text{effective marginal cost}}
+    + \bar{\mu}_{s,t} - \underline{\mu}_{s,t}
+    \label{eq:lmp_co2}
+\end{equation}
+
+\subsubsection{KKT Multipliers of the CO\textsubscript{2} Store}
+
+The intertemporal propagation of the carbon price follows
+equation~\eqref{eq:xi_propagation} applied to the CO$_2$ store:
+\begin{equation}
+    \lambda_{\text{CO}_2, t} = \lambda_{\text{CO}_2, t+1} + \bar{\gamma}_t
+    \label{eq:co2_intertemporal}
+\end{equation}
+
+\begin{itemize}
+    \item $\bar{\gamma}_t > 0$ only when $e^{\text{CO}_2}_t = E^{\text{CO}_2}_{\max}$
+          (budget fully exhausted): the system must curtail emitting generators
+          or switch to zero-emission alternatives
+    \item $\bar{\gamma}_t = 0$ when the store has remaining capacity
+    \item $\lambda_{\text{CO}_2, t}$ is \textbf{non-increasing over time}: emitting
+          early consumes the budget and reduces future flexibility
+\end{itemize}
+
+Summing~\eqref{eq:co2_intertemporal} forward:
+\begin{equation}
+    \lambda_{\text{CO}_2, t} = \sum_{\tau \ge t} \bar{\gamma}_\tau
+    \label{eq:co2_price_decomp}
+\end{equation}
+
+The carbon price at $t$ equals the sum of all future store-capacity rents.
+If the budget is never exhausted ($\bar{\gamma}_t = 0$ for all $t$), the
+carbon price is flat (constant over time). A tight budget produces a
+declining (or step-down) carbon price profile.
+
+\subsubsection{Comparison with a Global Constraint}
+
+An alternative to the store approach is a \textbf{global constraint}
+(e.g.\ PyPSA's \texttt{GlobalConstraint}):
+\begin{equation}
+    \sum_t w_t \sum_s \frac{\rho_s}{\eta_s} g_{s,t} \le E^{\text{CO}_2}_{\max}
+    \label{eq:global_co2}
+\end{equation}
+
+This has a single dual variable $\mu^{\text{CO}_2} \ge 0$ --- a constant carbon
+price applied identically at every snapshot.
+
+\paragraph{Shadow price relationship.}
+By the envelope theorem, both formulations attach a shadow price to the same
+parameter $E^{\text{CO}_2}_{\max}$. For the global constraint:
+$\partial \text{Cost}^*/\partial E^{\text{CO}_2}_{\max} = -\mu^{\text{CO}_2}$.
+For the store, relaxing $E^{\text{CO}_2}_{\max}$ relaxes every snapshot capacity
+constraint simultaneously, so the same derivative equals $-\sum_t \bar{\gamma}_t$.
+Using~\eqref{eq:co2_price_decomp}, this is $-\lambda_{\text{CO}_2,t=1}$
+(the CO$_2$ price at the first snapshot).
+Therefore:
+\begin{equation}
+    \mu^{\text{CO}_2} = \sum_t \bar{\gamma}_t = \lambda_{\text{CO}_2,\,t=1}
+    \label{eq:co2_shadow_relation}
+\end{equation}
+
+\paragraph{Are the two formulations actually equivalent in practice?}
+In a standard perfect-foresight annual optimisation \textbf{without CCS},
+the CO$_2$ store only ever fills: emissions are non-negative at every snapshot,
+so the state $e^{\text{CO}_2}_t$ increases monotonically from zero.
+The constraint $e^{\text{CO}_2}_t \le E^{\text{CO}_2}_{\max}$ is therefore
+slack at all intermediate snapshots and only binds at the final one ($t = T$).
+Consequently $\bar{\gamma}_t = 0$ for $t < T$ and
+\begin{equation}
+    \lambda_{\text{CO}_2,t} = \bar{\gamma}_T = \text{const.} = \mu^{\text{CO}_2}
+    \quad \forall\, t
+\end{equation}
+The carbon price is \textbf{constant and the two formulations are equivalent}.
+
+\paragraph{When do they differ?}
+The CO$_2$ store gives a time-varying price only when net CO$_2$ \emph{removals}
+occur at some snapshots --- i.e.\ when \textbf{CCS} is present and connected to
+the CO$_2$ bus with negative efficiency.
+CCS can draw the state back down from $E^{\text{CO}_2}_{\max}$, allowing the
+store to be full at one snapshot, partially drained later, then fill again.
+This creates multiple binding capacity constraints at different times
+($\bar{\gamma}_t > 0$ for several $t$) and a declining price profile
+$\lambda_{\text{CO}_2,t}$.
+The global constraint cannot represent this dynamic and forces a flat price
+regardless of the CCS dispatch profile.
+
+\paragraph{In PyPSA-Eur.}
+\begin{itemize}
+    \item $\lambda_{\text{CO}_2, t}$: \texttt{n.buses\_t.marginal\_price["co2"]}
+          in \euro/tCO$_2$
+    \item $\bar{\gamma}_t$: \texttt{n.stores\_t.mu\_upper["co2\_store"]}
+    \item For the global constraint: \texttt{n.global\_constraints.mu["CO2Limit"]}
+\end{itemize}
+
+% ============================================================
+\section{Summary: KKT Conditions}
+\label{sec:summary}
+% ============================================================
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\small
+\begin{tabular}{p{2.8cm}p{6.0cm}p{3.8cm}l}
+\hline
+\textbf{Variable} & \textbf{KKT condition} & \textbf{Economic meaning}
+    & \textbf{Ref.} \\
+\hline
+$g_{s,t}$ (generator) &
+    $\lambda_{n,t} = w_t o_s + \bar{\mu}_{s,t} - \underline{\mu}_{s,t}$ &
+    Price = var.\ cost $\pm$ rent &
+    \eqref{eq:stat_gen} \\
+$G_s$ (generator cap.) &
+    $c_s = \sum_t \bar{\mu}_{s,t}$ &
+    CAPEX = infra-marginal rents &
+    \eqref{eq:stat_cap_s} \\
+$f_{l,t}$ (line flow) &
+    $\lambda_{n^-,t} - \lambda_{n^+,t} = \sum_c \kappa_{c,t} C_{lc} x_l$\newline$\quad+ \bar{\mu}^+_{l,t} - \bar{\mu}^-_{l,t}$ &
+    Price diff = KVL coupling + congestion &
+    \eqref{eq:stat_flow} \\
+$F_l$ (line cap.) &
+    $c_l = \sum_t (\bar{\mu}^+_{l,t} + \bar{\mu}^-_{l,t})$ &
+    Line CAPEX = congestion rents &
+    \eqref{eq:stat_cap_l} \\
+$g_{s,t}$ (link/conv.) &
+    $\lambda_{n^-,t} = \eta_s \lambda_{n^+,t} + w_t o_s + \bar{\mu}_{s,t}$ &
+    Input price = eff.-weighted output + cost + rent &
+    \eqref{eq:stat_dispatch} \\
+$G_s$ (link cap.) &
+    $c_s = \sum_t \bar{\mu}_{s,t}$ &
+    CAPEX = conversion rents &
+    \eqref{eq:stat_cap_s} \\
+$g^+_{k,t}$ (charging) &
+    $w_t \eta^+ \lambda_{n,t} = \xi_t + \bar{\mu}^+_{k,t} - \underline{\mu}^+_{k,t}$ &
+    Charge value = shadow energy price &
+    \eqref{eq:stat_charge} \\
+$g^-_{k,t}$ (discharge) &
+    $w_t \lambda_{n,t} / \eta^- = \xi_t - \bar{\mu}^-_{k,t} + \underline{\mu}^-_{k,t}$ &
+    Discharge value = shadow energy price &
+    \eqref{eq:stat_discharge} \\
+$G^s_k$ (power cap.) &
+    $c^P_k = \sum_t (\bar{\mu}^+_{k,t} + \bar{\mu}^-_{k,t})$ &
+    Power CAPEX = power rents &
+    \eqref{eq:cap_stat_power} \\
+$E^s_{k,\max}$ (energy cap.) &
+    $c^E_k = \sum_t \bar{\gamma}_{k,t}$ &
+    Energy CAPEX = full-reservoir rents &
+    \eqref{eq:cap_stat_energy} \\
+$p_{0,t}$ (multi-link) &
+    $\eta_1 \lambda_{1,t} + \eta_2 \lambda_{2,t} = \lambda_{0,t} - w_t o_s + \bar{\mu}_{s,t}$ &
+    Output value = input cost $-$ var.\ cost + rent &
+    \eqref{eq:stat_multilink} \\
+CO$_2$ store &
+    $\lambda_{\text{CO}_2,t} = \sum_{\tau \ge t} \bar{\gamma}_\tau$ &
+    Carbon price = future budget rents &
+    \eqref{eq:co2_price_decomp} \\
+Emitting generator &
+    $\lambda_{n,t} = w_t(o_s + \tfrac{\rho_s}{\eta_s} \lambda_{\text{CO}_2,t}) + \bar{\mu}_{s,t}$ &
+    Effective cost augmented by carbon price &
+    \eqref{eq:lmp_co2} \\
+LCOP (any comp.) &
+    $\mathrm{LCOP}_s = \bar{\pi}^{\text{energy}}_{n,s}$ &
+    LCOP = energy-weighted LMP over production hours &
+    \eqref{eq:lcop_equals_energy_weighted_lmp} \\
+\hline
+\end{tabular}
+\caption{KKT stationarity conditions for capacity and dispatch optimisation.
+Dual variables with bars ($\bar{\mu}$) are zero when the associated constraint
+is not binding, positive only when it is.
+$\pi_{n,t} = \lambda_{n,t}/w_t$ denotes the nodal price in \euro/MWh.}
+\end{table}
+
+\paragraph{Central insight.}
+\begin{quote}
+\textbf{In a long-run competitive equilibrium, every investment is exactly justified
+by the rents it earns at binding hours.
+The KKT multipliers are simultaneously prices (for dispatch) and investment signals
+(for capacity). The LCOP of any optimally invested technology equals the
+energy-weighted average nodal price at its output bus over its production hours.}
+\end{quote}
+
+% ============================================================
+\section{PyPSA Best Practices: Saving KKT Multipliers}
+\label{sec:pypsa_practice}
+% ============================================================
+
+After solving a PyPSA network (e.g.\ with linopy via \texttt{n.optimize()}),
+not all KKT multipliers are automatically stored in the network object.
+This section documents how to access and save the most relevant ones.
+
+\subsection{Automatically Saved Multipliers}
+
+The following are saved by default after \texttt{n.optimize()}:
+
+\begin{itemize}
+    \item \textbf{Nodal marginal prices} $\lambda_{n,t}$:
+          \texttt{n.buses\_t.marginal\_price} \quad [\euro/MWh]
+    \item \textbf{Generator dispatch duals}:
+          \texttt{n.generators\_t.mu\_upper} ($\bar{\mu}_{s,t}$),
+          \texttt{n.generators\_t.mu\_lower} ($\underline{\mu}_{s,t}$)
+    \item \textbf{Line flow duals} (congestion rents):
+          \texttt{n.lines\_t.mu\_upper} ($\bar{\mu}^+_{l,t}$),
+          \texttt{n.lines\_t.mu\_lower} ($\bar{\mu}^-_{l,t}$)
+    \item \textbf{Link dispatch duals}:
+          \texttt{n.links\_t.mu\_upper} ($\bar{\mu}_{s,t}$),
+          \texttt{n.links\_t.mu\_lower} ($\underline{\mu}_{s,t}$)
+    \item \textbf{Store energy duals}:
+          \texttt{n.stores\_t.mu\_upper} ($\bar{\gamma}_{k,t}$),
+          \texttt{n.stores\_t.mu\_lower} ($\underline{\gamma}_{k,t}$)
+    \item \textbf{StorageUnit duals}:
+          \texttt{n.storage\_units\_t.mu\_upper},
+          \texttt{n.storage\_units\_t.mu\_lower}
+\end{itemize}
+
+\subsection{Capacity KKT Multipliers (Extendable Components)}
+
+The capacity duals ($\bar{\mu}^{p\_\text{nom}}_{s}$ for generators,
+$\bar{\mu}^{s\_\text{nom}}_{l}$ for lines, etc.) are \textbf{not saved
+automatically}. They must be extracted from the linopy model after solving.
+
+\begin{lstlisting}[caption={Extracting capacity KKT multipliers from linopy}]
+import pandas as pd
+
+# After n.optimize()
+m = n.model  # the linopy Model object
+
+# ---- Extendable generators: dual of p_nom constraint ----
+# The constraint name depends on PyPSA version; typical names:
+gen_cap_dual = (
+    m.constraints["Generator-ext-p_nom"]
+    .dual
+    .to_pandas()
+)
+# gen_cap_dual is a Series indexed by generator name
+# Units: EUR/MW (= annualised CAPEX, by investment equilibrium)
+n.generators.loc[gen_cap_dual.index, "mu_p_nom"] = gen_cap_dual
+
+# ---- Extendable lines: dual of s_nom constraint ----
+line_cap_dual = (
+    m.constraints["Line-ext-s_nom"]
+    .dual
+    .to_pandas()
+)
+n.lines.loc[line_cap_dual.index, "mu_s_nom"] = line_cap_dual
+
+# ---- Extendable links: dual of p_nom constraint ----
+link_cap_dual = (
+    m.constraints["Link-ext-p_nom"]
+    .dual
+    .to_pandas()
+)
+n.links.loc[link_cap_dual.index, "mu_p_nom"] = link_cap_dual
+
+# ---- Storage: extendable energy capacity dual ----
+store_e_dual = (
+    m.constraints["Store-ext-e_nom"]
+    .dual
+    .to_pandas()
+)
+n.stores.loc[store_e_dual.index, "mu_e_nom"] = store_e_dual
+\end{lstlisting}
+
+\textbf{Verification:} The investment equilibrium condition $c_s = \sum_t \bar{\mu}_{s,t}$
+can be checked as:
+\begin{lstlisting}[caption={Checking investment equilibrium}]
+# For extendable generators
+rents = n.generators_t.mu_upper.sum()  # sum of infra-marginal rents
+capex = n.generators.capital_cost       # annualised capital cost
+# At optimum: rents[gen] ~= capex[gen] for all extendable generators
+print((rents - capex)[n.generators.p_nom_extendable])
+\end{lstlisting}
+
+\subsection{KVL Constraint Duals ($\kappa_{c,t}$)}
+
+The KVL constraint duals are accessible via:
+\begin{lstlisting}[caption={Extracting KVL (Kirchhoff) constraint duals}]
+# Kirchhoff (cycle) constraints
+kvl_dual = (
+    m.constraints["Kirchhoff-Voltage-Law-s"]
+    .dual
+    .to_pandas()
+)
+# Rows = snapshots, columns = cycle indices
+# Units: EUR/(MW*Ohm) or consistent with the LP formulation
+\end{lstlisting}
+
+The exact constraint name may vary with PyPSA version; use
+\texttt{m.constraints} to list all available constraints.
+
+\subsection{Cycling Store Constraint Dual}
+
+For a store with the cyclic state-of-charge condition \eqref{eq:cycling}:
+\begin{lstlisting}[caption={Cycling store constraint dual}]
+# The cycling constraint dual is typically part of the SOE
+# initialisation. In linopy-based PyPSA:
+cycling_dual = (
+    m.constraints["Store-cyclic-e"]
+    .dual
+    .to_pandas()
+)
+# This is the dual of e_0 = e_T (scalar per store)
+\end{lstlisting}
+
+\subsection{Computing LCOP in PyPSA}
+
+\begin{lstlisting}[caption={Computing LCOP for a link delivering to bus b1}]
+def compute_lcop(n, link_name, output_bus, output_eff_col="efficiency"):
+    """
+    Compute the LCOP for a PyPSA Link component.
+
+    Parameters
+    ----------
+    n : pypsa.Network
+    link_name : str
+    output_bus : str  (bus name of the primary output)
+    output_eff_col : str  (column in n.links for output efficiency)
+    """
+    w = n.snapshot_weightings.generators  # snapshot weights [hours]
+    p0 = n.links_t.p0[link_name]         # input flow [MW]
+    eta_out = n.links.at[link_name, output_eff_col]
+
+    # Output energy [MWh]
+    output_energy = (w * eta_out * p0).sum()
+
+    # Capital cost [EUR/year]
+    capex = n.links.at[link_name, "capital_cost"] * \
+            n.links.at[link_name, "p_nom_opt"]
+
+    # Variable cost [EUR/year]
+    var_cost = (w * n.links.at[link_name, "marginal_cost"] * p0).sum()
+
+    # Input cost [EUR/year]
+    input_bus = n.links.at[link_name, "bus0"]
+    pi_in = n.buses_t.marginal_price[input_bus]
+    input_cost = (w * pi_in * p0).sum()
+
+    lcop = (capex + var_cost + input_cost) / output_energy
+
+    # Verification: should equal energy-weighted nodal price
+    pi_out = n.buses_t.marginal_price[output_bus]
+    output_flow = eta_out * p0
+    ewap = (w * output_flow * pi_out).sum() / (w * output_flow).sum()
+
+    return lcop, ewap  # should be approximately equal at optimum
+\end{lstlisting}
+
+\bigskip
+
+% ============================================================
+\section{Nomenclature}
+\label{sec:nomenclature}
+% ============================================================
+
+Bars ($\bar{\cdot}$) denote upper-bound duals; underlines ($\underline{\cdot}$)
+denote lower-bound duals.  Asterisks (${}^*$) denote optimal values.
+Subscripts follow the conventions: $s$ for components, $l$ for lines, $k$ for
+stores, $n$ for nodes, $t$ for snapshots, $c$ for cycles.
+
+\renewcommand{\arraystretch}{1.3}
+\setlength{\tabcolsep}{5pt}
+
+\noindent\textbf{Sets and indices}\par\smallskip
+\noindent\begin{tabular}{lp{11cm}}
+$s$ & Index for generators and dispatchable links \\
+$l$ & Index for passive transmission lines \\
+$k$ & Index for store (storage) components \\
+$n$ & Index for nodes (buses) \\
+$t$ & Index for time snapshots \\
+$c$ & Index for independent cycles in the network \\
+$\mathcal{S}_n$ & Set of all components injecting into node $n$ \\
+$\mathcal{K}_n$ & Set of store components connected to node $n$ \\
+$\mathcal{L}^{\mathrm{in}}_n,\;\mathcal{L}^{\mathrm{out}}_n$
+    & Sets of links with output at / input from node $n$ \\
+$\mathcal{P}_k$ & $k$-th non-overlapping subset in a component partition \\
+\end{tabular}
+
+\medskip
+\noindent\textbf{Primal decision variables}\par\smallskip
+\noindent\begin{tabular}{lp{11cm}}
+$g_{s,t}$ & Dispatch of component $s$ at snapshot $t$ [MW] \\
+$G_s$ & Installed (optimised) capacity of component $s$ [MW] \\
+$f_{l,t}$ & Power flow on line $l$ at snapshot $t$ [MW] \\
+$F_l$ & Capacity of line $l$ [MW] \\
+$e_{k,t}$ & State of energy of store $k$ at snapshot $t$ [MWh] \\
+$g^+_{k,t},\; g^-_{k,t}$ & Charge / discharge power of store $k$ at snapshot $t$ [MW] \\
+$G^s_k$ & Power capacity of store $k$ [MW] \\
+$E^s_{k,\max}$ & Energy capacity of store $k$ [MWh] \\
+$p_{0,t}$ & Input flow of a multi-carrier link at snapshot $t$ [MW] \\
+\end{tabular}
+
+\medskip
+\noindent\textbf{Parameters}\par\smallskip
+\noindent\begin{tabular}{lp{11cm}}
+$c_s,\; c_l$ & Annualised capital cost of component / line [\euro/MW/year] \\
+$c^P_k$ & Power capacity cost of store $k$ [\euro/MW/year] \\
+$c^E_k$ & Energy capacity cost of store $k$ [\euro/MWh/year] \\
+$o_s$ & Variable (marginal) operating cost of component $s$ [\euro/MWh] \\
+$w_t$ & Snapshot weight: duration represented by snapshot $t$ [hours] \\
+$d_{n,t}$ & Inelastic demand at node $n$ at snapshot $t$ [MW] \\
+$\eta_s$ & Conversion efficiency of component $s$ [--] \\
+$\eta^+_k,\; \eta^-_k$ & Charge / discharge efficiency of store $k$ [--] \\
+$\eta_1,\; \eta_2$ & Output efficiencies for the primary / secondary output of a
+                     multi-carrier link [--] \\
+$x_l$ & Reactance of line $l$ [p.u.] \\
+$K_{nl}$ & Node--line incidence matrix ($+1$ if line ends at $n$, $-1$ if it starts there) \\
+$C_{\ell c}$ & Cycle--branch incidence matrix entry ($\pm 1$ or $0$) \\
+$n^-(s),\; n^+(s)$ & Input / output bus of component $s$ \\
+$\rho_s$ & CO$_2$ emission intensity of component $s$ [tCO$_2$/MWh$_\mathrm{th}$] \\
+\end{tabular}
+
+\medskip
+\noindent\textbf{Dual variables (KKT multipliers)}\par\smallskip
+\noindent\begin{tabular}{lp{11cm}}
+$\lambda_{n,t}$ & Dual of the nodal power balance (KCL) at node $n$, snapshot $t$;
+                  the \textbf{Locational Marginal Price (LMP)}.
+                  In [\euro/MW]; divide by $w_t$ to obtain [\euro/MWh] \\
+$\kappa_{c,t}$ & Dual of the KVL cycle constraint for independent cycle $c$;
+                 shadow price of Kirchhoff's voltage law \\
+$\bar{\mu}_{s,t}$ & Dual of the upper dispatch bound $g_{s,t} \le G_s$;
+                    \textbf{infra-marginal rent} of component $s$ at snapshot $t$
+                    [\euro/MW] \\
+$\underline{\mu}_{s,t}$ & Dual of the lower dispatch bound $g_{s,t} \ge 0$;
+                          shadow cost of idling [\euro/MW] \\
+$\bar{\mu}^+_{l,t},\; \bar{\mu}^-_{l,t}$ & Duals of the upper / lower flow limits on line $l$;
+                    \textbf{congestion rents} [\euro/MW] \\
+$\xi_{k,t}$ & Dual of the SOE evolution constraint for store $k$;
+              \textbf{shadow price of stored energy} [\euro/MWh] \\
+$\bar{\gamma}_{k,t}$ & Dual of the energy upper bound $e_{k,t} \le E^s_{k,\max}$;
+                       \textbf{full-reservoir rent} [\euro/MWh] \\
+$\underline{\gamma}_{k,t}$ & Dual of the energy lower bound $e_{k,t} \ge 0$ [\euro/MWh] \\
+$\bar{\mu}^+_{k,t},\; \bar{\mu}^-_{k,t}$ & Duals of the charge / discharge power upper bounds
+                    for store $k$ [\euro/MW] \\
+$\underline{\mu}^+_{k,t},\; \underline{\mu}^-_{k,t}$ & Duals of the charge / discharge power
+                    lower bounds for store $k$ [\euro/MW] \\
+$\lambda_{\mathrm{CO_2},t}$ & Dual of the CO$_2$ nodal balance;
+                              \textbf{time-varying carbon price} [\euro/tCO$_2$] \\
+$\bar{\gamma}_t$ & Dual of the CO$_2$ store energy upper bound;
+                   carbon budget scarcity rent [\euro/tCO$_2$] \\
+$\mu^{\mathrm{CO_2}}$ & Dual of the global CO$_2$ constraint (GlobalConstraint);
+                        \textbf{constant carbon shadow price} [\euro/tCO$_2$] \\
+\end{tabular}
+
+\medskip
+\noindent\textbf{Derived quantities}\par\smallskip
+\noindent\begin{tabular}{lp{11cm}}
+$\pi_{n,t}$ & Nodal price at node $n$, snapshot $t$, defined as
+              $\pi_{n,t} = \lambda_{n,t}/w_t$ [\euro/MWh] \\
+$\mathrm{LCOP}_s$ & Levelized Cost of Production for component $s$ [\euro/MWh]:
+                    total annualised cost divided by total energy produced \\
+$\bar{\pi}^{\mathrm{energy}}_{n,s}$ & Production-weighted average nodal price for component $s$
+                    at bus $n$ [\euro/MWh]; equals $\mathrm{LCOP}_s$ at LP optimum
+                    for extendable components \\
+$\bar{\pi}^{\mathrm{prod}}_{b,s}$ & Same quantity normalised to primary-product output at bus $b$
+                    (used for multi-carrier links) \\
+$r_s$ & Total infra-marginal rent of fixed-capacity component $s$,
+        $r_s = \sum_t \bar{\mu}_{s,t} G_s$ [\euro/year] \\
+$\rho_k$ & Cycling constraint dual for store $k$ [\euro/MWh];
+           anchors the intertemporal price chain $\xi_{k,t}$ \\
+\end{tabular}
+
+\renewcommand{\arraystretch}{1}
+\setlength{\tabcolsep}{6pt}
+
+\begin{thebibliography}{9}
+\bibitem{Horsch2018}
+J.~H\"orsch, H.~Ronellenfitsch, D.~Witthaut, T.~Brown,
+``Linear optimal power flow using cycle flows,''
+\textit{Electric Power Systems Research}, vol.~158, pp.~126--135, 2018.
+
+\bibitem{Boyd2004}
+S.~Boyd and L.~Vandenberghe,
+\textit{Convex Optimization}.
+Cambridge University Press, 2004.
+(Available free at \texttt{stanford.edu/\textasciitilde boyd/cvxbook})
+
+\bibitem{Bertsekas2016}
+D.~P.~Bertsekas,
+\textit{Nonlinear Programming}, 3rd~ed.
+Athena Scientific, 2016.
+
+\bibitem{Stoft2002}
+S.~Stoft,
+\textit{Power System Economics: Designing Markets for Electricity}.
+Wiley-IEEE Press, 2002.
+
+\bibitem{Kirschen2004}
+D.~Kirschen and G.~Strbac,
+\textit{Fundamentals of Power System Economics}.
+Wiley, 2004.
+
+\bibitem{Varian1992}
+H.~R.~Varian,
+\textit{Microeconomic Analysis}, 3rd~ed.
+W.~W.~Norton \& Company, 1992.
+\end{thebibliography}
+
+\end{document}
